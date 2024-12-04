@@ -54,11 +54,12 @@ def parse_fcpxml(filepath):
     sequences = []
     
     for sequence in root.findall(".//sequence"):
-        seq_name = sequence.find("name").text
-        duration = int(sequence.find("duration").text)
-        rate = int(sequence.find("rate/timebase").text)
-        width = int(sequence.find(".//samplecharacteristics/width").text)
-        height = int(sequence.find(".//samplecharacteristics/height").text)
+        # Ensure elements are found or set a default value
+        seq_name = sequence.find("name").text if sequence.find("name") is not None else "Unnamed Sequence"
+        duration = int(sequence.find("duration").text) if sequence.find("duration") is not None else 0
+        rate = int(sequence.find("rate/timebase").text) if sequence.find("rate/timebase") is not None else 30
+        width = int(sequence.find(".//samplecharacteristics/width").text) if sequence.find(".//samplecharacteristics/width") is not None else 1920
+        height = int(sequence.find(".//samplecharacteristics/height").text) if sequence.find(".//samplecharacteristics/height") is not None else 1080
         
         tracks = []
         
@@ -67,10 +68,10 @@ def parse_fcpxml(filepath):
             
             for clip in track.findall("clipitem"):
                 clip_type = "video" if clip.find(".//media/video") is not None else "audio"
-                clip_name = clip.find("name").text
-                start = int(clip.find("start").text)
-                end = int(clip.find("end").text)
-                file_path = clip.find(".//file/pathurl").text
+                clip_name = clip.find("name").text if clip.find("name") is not None else "Unnamed Clip"
+                start = int(clip.find("start").text) if clip.find("start") is not None else 0
+                end = int(clip.find("end").text) if clip.find("end") is not None else start + 100
+                file_path = clip.find(".//file/pathurl").text if clip.find(".//file/pathurl") is not None else "None"
                 in_frame = int(clip.find("in").text) if clip.find("in") is not None else 0
                 out_frame = int(clip.find("out").text) if clip.find("out") is not None else end
                 
@@ -98,6 +99,7 @@ def parse_fcpxml(filepath):
     return sequences
 
 
+
 def configure_scene(context, width, height, fps, duration):
     """Configure the scene settings such as resolution and FPS."""
     scene = context.scene
@@ -114,12 +116,14 @@ def import_fcpxml(context, filepath, report_error, search_paths=None):
     base_dir = os.path.dirname(filepath)
     sequences = parse_fcpxml(filepath)
     
+    # Index the base directory first
+    file_index = FilePathIndex([base_dir])
+    if search_paths:
+        # Add additional search paths after indexing the base directory
+        file_index.search_paths.extend(search_paths)
+        file_index.file_index.update(file_index.build_index(search_paths))
+    
     missing_files = {}  # Store missing file information
-    
-    # If search_paths are provided, use them to find missing files
-    file_index = FilePathIndex(search_paths or [])  # Initialize file index
-    
-    print(f"Initial search paths: {search_paths}")  # Debug print
     
     for seq in sequences:
         configure_scene(context, seq['width'], seq['height'], seq['rate'], seq['duration'])
@@ -131,29 +135,19 @@ def import_fcpxml(context, filepath, report_error, search_paths=None):
         for track in seq['tracks']:
             for clip in track['clips']:
                 file_path = clip['file_path']
-                
-                # Check if the file path is missing or invalid
-                print(f"Checking file: {file_path}")  # Debug print
-                
                 if not file_path or file_path == "None":
-                    print(f"Missing file: {file_path}")  # Debug print
                     missing_files[clip['file_path']] = [base_dir]
                     continue
                 
-                # Normalize file path to absolute path
                 file_path = bpy.path.abspath(file_path)
-                
                 if not os.path.isabs(file_path):
                     file_path = os.path.join(base_dir, file_path)
                 
-                # Check file existence in the index (optimized)
                 resolved_path = file_index.find_file(file_path)
                 
                 if resolved_path and os.path.isfile(resolved_path):
-                    print(f"Found file: {resolved_path}")  # Debug print
                     file_path = resolved_path
                 else:
-                    print(f"File missing: {file_path}")  # Debug print
                     missing_files[clip['file_path']] = [base_dir]
                     continue
                 
@@ -189,7 +183,7 @@ def import_fcpxml(context, filepath, report_error, search_paths=None):
 class FCPXMLImportOperator(bpy.types.Operator):
     """Operator to import FCPXML"""
     bl_idname = "sequencer.import_fcpxml"
-    bl_label = "Import FCPXML"
+    bl_label = "Search Folder for Missing Files:"
     
     filepath: bpy.props.StringProperty(subtype="FILE_PATH")
     search_path: bpy.props.StringProperty(
@@ -199,12 +193,17 @@ class FCPXMLImportOperator(bpy.types.Operator):
     )
     
     def execute(self, context):
-        # Ensure the search path is passed correctly
-        search_paths = [self.search_path] if self.search_path else []
-        result, missing_files = import_fcpxml(context, self.filepath, self.report, search_paths)
+        # Search paths now include the folder where the XML file resides
+        result, missing_files = import_fcpxml(
+            context, 
+            self.filepath, 
+            self.report, 
+            search_paths=[self.search_path] if self.search_path else None
+        )
         
         if missing_files:
-            self.report({'WARNING'}, f"Missing files: {', '.join(set(missing_files.keys()))}")
+            #self.report({'WARNING'}, f"Missing files: {', '.join(set(missing_files.keys()))}")
+            print(f"Missing files: {', '.join(set(missing_files.keys()))}")
             return self.invoke_search(context)
         
         return result
@@ -214,14 +213,14 @@ class FCPXMLImportOperator(bpy.types.Operator):
         return {'RUNNING_MODAL'}
     
     def invoke_search(self, context):
-        """If missing files were found, show browser folder"""
-        print("Missing files found, invoking search dialog.")  # Debug print
+        """Prompt user for a folder if missing files remain after initial checks."""
         context.window_manager.invoke_props_dialog(self)
         return {'RUNNING_MODAL'}
     
     def draw(self, context):
         layout = self.layout
         layout.prop(self, "search_path", text="Search Folder")
+
     
 def menu_func_import(self, context):
     self.layout.operator(FCPXMLImportOperator.bl_idname, text="FCPXML (.xml)")
