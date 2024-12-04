@@ -1,236 +1,275 @@
 import bpy
 import xml.etree.ElementTree as ET
 import os
+import logging
+from typing import List, Dict, Any, Tuple
 
 bl_info = {
-    "name": "FCPXML Importer",
-    "blender": (3, 0, 0),
-    "category": "Sequencer",
-    "description": "Import FCPXML files including video, audio, transitions, and nested sequences into Blender's Video Sequence Editor.",
+    "name": "Enhanced FCPXML Importer",
     "author": "tintwotin",
-    "version": (1, 0, 0),
+    "version": (1, 1, 0),
+    "blender": (3, 0, 0),
     "location": "File > Import > FCPXML (.xml)",
+    "description": "Import FCPXML files with advanced media resolution and sequence handling",
     "warning": "",
-    "tracker_url": "",
+    "category": "Sequencer",
     "support": "COMMUNITY",
-    "wiki_url": "",
-    "doc_url": "",
 }
 
-class FilePathIndex:
-    def __init__(self, search_paths):
-        self.search_paths = search_paths
-        self.file_index = self.build_index(search_paths)
+class MediaResolver:
+    def __init__(self, base_paths: List[str]):
+        """
+        Initialize media resolver with multiple search paths
+        
+        Args:
+            base_paths (List[str]): List of directories to search for media files
+        """
+        self.search_paths = base_paths
+        self.file_cache = self._build_file_cache()
+        self.logger = logging.getLogger(__name__)
     
-    def build_index(self, paths):
-        """Build a cache index of all files in the search paths."""
-        file_index = {}
-        for path in paths:
-            print(f"Indexing path: {path}")  # Debug print to show the paths being indexed
-            for root, dirs, files in os.walk(path):
-                for file in files:
-                    lower_case_name = file.lower()
-                    file_index[lower_case_name] = os.path.join(root, file)
-        print(f"Index built with {len(file_index)} files.")  # Debug print to show number of files indexed
-        return file_index
+    def _build_file_cache(self) -> Dict[str, str]:
+        """
+        Build comprehensive file cache across all search paths
+        
+        Returns:
+            Dict[str, str]: Mapping of normalized filenames to full paths
+        """
+        file_cache = {}
+        for path in self.search_paths:
+            if not os.path.exists(path):
+                continue
+            
+            for root, _, files in os.walk(path):
+                for filename in files:
+                    normalized_name = os.path.normcase(filename)
+                    full_path = os.path.normpath(os.path.join(root, filename))
+                    file_cache[normalized_name] = full_path
+        
+        return file_cache
     
-    def find_file(self, filename):
-        """Find a file in the indexed directories, case insensitive."""
-        lower_case_name = os.path.basename(filename.lower())
-        print(f"Searching for file: {filename}")  # Debug print to show which file is being searched
-        resolved_path = self.file_index.get(lower_case_name, None)
-        #resolved_path = self.file_index.find_file(os.path.basename(file_path))
-        if resolved_path:
-            print(f"File found: {resolved_path}")  # Debug print to show if the file was found
-        else:
-            print(f"File not found: {filename}")  # Debug print to show if the file was not found
-        return resolved_path
+    def resolve_media_path(self, original_path: str) -> str:
+        """
+        Resolve media file path with multiple fallback strategies
+        
+        Args:
+            original_path (str): Original media file path from FCPXML
+        
+        Returns:
+            str: Resolved absolute path to media file or empty string
+        """
+        # Extract base filename
+        filename = os.path.basename(original_path)
+        normalized_name = os.path.normcase(filename)
+        
+        # Direct cache lookup
+        if normalized_name in self.file_cache:
+            return self.file_cache[normalized_name]
+        
+        # Partial name matching
+        matches = [
+            path for name, path in self.file_cache.items() 
+            if normalized_name in name
+        ]
+        
+        return matches[0] if matches else ""
 
-def parse_fcpxml(filepath):
-    """Parse the FCPXML file and extract relevant data."""
-    tree = ET.parse(filepath)
-    root = tree.getroot()
+class FCPXMLParser:
+    @staticmethod
+    def parse(filepath: str) -> List[Dict[str, Any]]:
+        """
+        Parse FCPXML file and extract sequence information
+        
+        Args:
+            filepath (str): Path to FCPXML file
+        
+        Returns:
+            List[Dict[str, Any]]: List of parsed sequences
+        """
+        try:
+            tree = ET.parse(filepath)
+            root = tree.getroot()
+            
+            sequences = []
+            for sequence in root.findall(".//sequence"):
+                seq_data = FCPXMLParser._extract_sequence_data(sequence)
+                sequences.append(seq_data)
+            
+            return sequences
+        except ET.ParseError as e:
+            logging.error(f"XML Parse Error: {e}")
+            return []
     
-    sequences = []
-    
-    for sequence in root.findall(".//sequence"):
-        # Ensure elements are found or set a default value
+    @staticmethod
+    def _extract_sequence_data(sequence: ET.Element) -> Dict[str, Any]:
+        """
+        Extract detailed sequence data from XML element
+        
+        Args:
+            sequence (ET.Element): XML sequence element
+        
+        Returns:
+            Dict[str, Any]: Parsed sequence metadata and track information
+        """
         seq_name = sequence.find("name").text if sequence.find("name") is not None else "Unnamed Sequence"
-        duration = int(sequence.find("duration").text) if sequence.find("duration") is not None else 0
-        rate = int(sequence.find("rate/timebase").text) if sequence.find("rate/timebase") is not None else 30
-        width = int(sequence.find(".//samplecharacteristics/width").text) if sequence.find(".//samplecharacteristics/width") is not None else 1920
-        height = int(sequence.find(".//samplecharacteristics/height").text) if sequence.find(".//samplecharacteristics/height") is not None else 1080
+        duration = int(sequence.find("duration").text or 0)
+        rate = int(sequence.find("rate/timebase").text or 30)
+        
+        width = int(sequence.find(".//samplecharacteristics/width").text or 1920)
+        height = int(sequence.find(".//samplecharacteristics/height").text or 1080)
         
         tracks = []
-        
         for track in sequence.findall(".//track"):
-            clips = []
-            
+            track_clips = []
             for clip in track.findall("clipitem"):
-                clip_type = "video" if clip.find(".//media/video") is not None else "audio"
-                clip_name = clip.find("name").text if clip.find("name") is not None else "Unnamed Clip"
-                start = int(clip.find("start").text) if clip.find("start") is not None else 0
-                end = int(clip.find("end").text) if clip.find("end") is not None else start + 100
-                file_path = clip.find(".//file/pathurl").text if clip.find(".//file/pathurl") is not None else "None"
-                in_frame = int(clip.find("in").text) if clip.find("in") is not None else 0
-                out_frame = int(clip.find("out").text) if clip.find("out") is not None else end
-                
-                clips.append({
-                    "type": clip_type,
-                    "name": clip_name,
-                    "start": start,
-                    "end": end,
-                    "in": in_frame,
-                    "out": out_frame,
-                    "file_path": file_path
-                })
-            
-            tracks.append({"clips": clips})
+                clip_data = FCPXMLParser._extract_clip_data(clip)
+                track_clips.append(clip_data)
+            tracks.append({"clips": track_clips})
         
-        sequences.append({
+        return {
             "name": seq_name,
             "duration": duration,
             "rate": rate,
             "width": width,
             "height": height,
             "tracks": tracks
-        })
+        }
     
-    return sequences
-
-
-
-def configure_scene(context, width, height, fps, duration):
-    """Configure the scene settings such as resolution and FPS."""
-    scene = context.scene
-    scene.render.resolution_x = width
-    scene.render.resolution_y = height
-    scene.render.fps = fps
-    scene.frame_start = 1
-    scene.frame_end = int(duration * fps)  # Set the frame_end based on sequence duration
-    scene.sequence_editor_create()
-
-
-def import_fcpxml(context, filepath, report_error, search_paths=None):
-    """Main function to import the FCPXML into Blender."""
-    base_dir = os.path.dirname(filepath)
-    sequences = parse_fcpxml(filepath)
-    
-    # Index the base directory first
-    file_index = FilePathIndex([base_dir])
-    if search_paths:
-        # Add additional search paths after indexing the base directory
-        file_index.search_paths.extend(search_paths)
-        file_index.file_index.update(file_index.build_index(search_paths))
-    
-    missing_files = {}  # Store missing file information
-    
-    for seq in sequences:
-        configure_scene(context, seq['width'], seq['height'], seq['rate'], seq['duration'])
+    @staticmethod
+    def _extract_clip_data(clip: ET.Element) -> Dict[str, Any]:
+        """
+        Extract detailed clip data from XML element
         
-        vse = bpy.context.scene.sequence_editor
-        video_channel = 2
-        audio_channel = 1
+        Args:
+            clip (ET.Element): XML clip element
         
-        for track in seq['tracks']:
-            for clip in track['clips']:
-                file_path = clip['file_path']
-                if not file_path or file_path == "None":
-                    missing_files[clip['file_path']] = [base_dir]
-                    continue
-                
-                file_path = bpy.path.abspath(file_path)
-                if not os.path.isabs(file_path):
-                    file_path = os.path.join(base_dir, file_path)
-                
-                resolved_path = file_index.find_file(file_path)
-                
-                if resolved_path and os.path.isfile(resolved_path):
-                    file_path = resolved_path
-                else:
-                    missing_files[clip['file_path']] = [base_dir]
-                    continue
-                
-                # Create video or sound strip
-                if clip['type'] == 'video':
-                    strip = vse.sequences.new_movie(
-                        name=clip['name'],
-                        filepath=file_path,
-                        channel=video_channel,
-                        frame_start=clip['start']
-                    )
-                    strip.frame_final_end = clip['start'] + (clip['out'] - clip['in'])
-                    strip.frame_start = clip['start'] - clip['in']
-                    strip.frame_offset_start = clip['start']
-                    strip.frame_final_duration = clip['out'] - clip['in']
-                    strip.channel = video_channel
-                else:
-                    strip = vse.sequences.new_sound(
-                        name=clip['name'],
-                        filepath=file_path,
-                        channel=audio_channel,
-                        frame_start=clip['start']
-                    )
-                    strip.frame_final_end = clip['start'] + (clip['out'] - clip['in'])
-                    strip.frame_start = clip['start'] - clip['in']
-                    strip.frame_offset_start = clip['start']
-                    strip.frame_final_duration = clip['out'] - clip['in']
-                    strip.channel = audio_channel
-    
-    return {'FINISHED'}, missing_files
+        Returns:
+            Dict[str, Any]: Parsed clip metadata
+        """
+        return {
+            "type": "video" if clip.find(".//media/video") is not None else "audio",
+            "name": clip.find("name").text if clip.find("name") is not None else "Unnamed Clip",
+            "start": int(clip.find("start").text or 0),
+            "end": int(clip.find("end").text or 0),
+            "in_frame": int(clip.find("in").text or 0),
+            "out_frame": int(clip.find("out").text or 0),
+            "file_path": clip.find(".//file/pathurl").text if clip.find(".//file/pathurl") is not None else ""
+        }
 
-
-class FCPXMLImportOperator(bpy.types.Operator):
-    """Operator to import FCPXML"""
-    bl_idname = "sequencer.import_fcpxml"
-    bl_label = "Search Folder for Missing Files:"
+class FCPXMLImporter:
+    @staticmethod
+    def configure_scene(context, width: int, height: int, fps: int, duration: int):
+        """
+        Configure Blender scene settings based on imported sequence
+        
+        Args:
+            context (bpy.context): Blender context
+            width (int): Scene width
+            height (int): Scene height
+            fps (int): Frames per second
+            duration (int): Sequence duration
+        """
+        scene = context.scene
+        scene.render.resolution_x = width
+        scene.render.resolution_y = height
+        scene.render.fps = fps
+        scene.frame_start = 1
+        scene.frame_end = int(duration * fps)
+        
+        if not scene.sequence_editor:
+            scene.sequence_editor_create()
     
-    filepath: bpy.props.StringProperty(subtype="FILE_PATH")
-    search_path: bpy.props.StringProperty(
-        name="Search Folder",
-        description="Folder to search for missing files",
-        subtype='DIR_PATH'
-    )
-    
-    def execute(self, context):
-        # Search paths now include the folder where the XML file resides
-        result, missing_files = import_fcpxml(
+    @staticmethod
+    def import_sequence(context, sequence: Dict[str, Any], media_resolver: MediaResolver):
+        """
+        Import a single sequence into Blender's VSE
+        
+        Args:
+            context (bpy.context): Blender context
+            sequence (Dict[str, Any]): Parsed sequence data
+            media_resolver (MediaResolver): Media file path resolver
+        
+        Returns:
+            List[str]: List of missing media files
+        """
+        FCPXMLImporter.configure_scene(
             context, 
-            self.filepath, 
-            self.report, 
-            search_paths=[self.search_path] if self.search_path else None
+            sequence['width'], 
+            sequence['height'], 
+            sequence['rate'], 
+            sequence['duration']
         )
         
-        if missing_files:
-            #self.report({'WARNING'}, f"Missing files: {', '.join(set(missing_files.keys()))}")
-            print(f"Missing files: {', '.join(set(missing_files.keys()))}")
-            return self.invoke_search(context)
+        missing_files = []
+        vse = context.scene.sequence_editor
+        video_channel, audio_channel = 2, 1
         
-        return result
+        for track in sequence['tracks']:
+            for clip in track['clips']:
+                resolved_path = media_resolver.resolve_media_path(clip['file_path'])
+                
+                if not resolved_path:
+                    missing_files.append(clip['file_path'])
+                    continue
+                
+                strip_method = (
+                    vse.sequences.new_movie 
+                    if clip['type'] == 'video' 
+                    else vse.sequences.new_sound
+                )
+                
+                strip = strip_method(
+                    name=clip['name'],
+                    filepath=resolved_path,
+                    channel=video_channel if clip['type'] == 'video' else audio_channel,
+                    frame_start=clip['start']
+                )
+                
+                strip.frame_final_end = clip['start'] + (clip['out_frame'] - clip['in_frame'])
+                strip.frame_start = clip['start'] - clip['in_frame']
+                strip.frame_offset_start = clip['start']
+                strip.frame_final_duration = clip['out_frame'] - clip['in_frame']
+        
+        return missing_files
+
+class SEQUENCER_OT_import_fcpxml(bpy.types.Operator):
+    """Import FCPXML files with advanced media resolution"""
+    bl_idname = "sequencer.import_enhanced_fcpxml"
+    bl_label = "Import FCPXML"
+    
+    filepath: bpy.props.StringProperty(subtype="FILE_PATH")
+    search_paths: bpy.props.CollectionProperty(type=bpy.types.PropertyGroup)
+    
+    def execute(self, context):
+        base_path = os.path.dirname(self.filepath)
+        search_paths = [base_path] + [path.name for path in self.search_paths]
+        
+        media_resolver = MediaResolver(search_paths)
+        sequences = FCPXMLParser.parse(self.filepath)
+        
+        missing_files = []
+        for sequence in sequences:
+            sequence_missing = FCPXMLImporter.import_sequence(context, sequence, media_resolver)
+            missing_files.extend(sequence_missing)
+        
+        if missing_files:
+            self.report({'WARNING'}, f"Missing files: {len(missing_files)}")
+        
+        return {'FINISHED'}
     
     def invoke(self, context, event):
         context.window_manager.fileselect_add(self)
         return {'RUNNING_MODAL'}
-    
-    def invoke_search(self, context):
-        """Prompt user for a folder if missing files remain after initial checks."""
-        context.window_manager.invoke_props_dialog(self)
-        return {'RUNNING_MODAL'}
-    
-    def draw(self, context):
-        layout = self.layout
-        layout.prop(self, "search_path", text="Search Folder")
 
-    
 def menu_func_import(self, context):
-    self.layout.operator(FCPXMLImportOperator.bl_idname, text="FCPXML (.xml)")
+    self.layout.operator(SEQUENCER_OT_import_fcpxml.bl_idname, text="Enhanced FCPXML (.xml)")
 
 def register():
-    bpy.utils.register_class(FCPXMLImportOperator)
+    bpy.utils.register_class(SEQUENCER_OT_import_fcpxml)
     bpy.types.TOPBAR_MT_file_import.append(menu_func_import)
 
 def unregister():
-    bpy.utils.unregister_class(FCPXMLImportOperator)
+    bpy.utils.unregister_class(SEQUENCER_OT_import_fcpxml)
     bpy.types.TOPBAR_MT_file_import.remove(menu_func_import)
 
 if __name__ == "__main__":
